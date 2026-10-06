@@ -1,0 +1,963 @@
+<!-- src/main/resources/trace.html -->
+<!doctype html>
+<html lang="ko">
+
+<head>
+  <meta charset="utf-8" />
+  <title>trace {{traceId}}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <style>
+    /* ========== 기본 토큰 ========== */
+    :root {
+      --border: #e5e7eb;
+      --bg: #ffffff;
+      --muted: #6b7280;
+      --ink: #1f2937;
+      --ink-weak: #374151;
+      --subtle: #f8fafc;
+    }
+
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: system-ui, Segoe UI, Arial, sans-serif;
+    }
+
+    /* ========== 페이지 레이아웃 ========== */
+    .page {
+      display: grid;
+      grid-template-columns: 3fr 2fr;
+      /* 좌: 타임라인/그래프, 우: 상세 */
+      grid-template-rows: auto auto;
+      /* 1행: 타임라인, 2행: 서비스 그래프 */
+      grid-template-areas:
+        "timeline detail"
+        "svcgraph detail";
+      gap: 12px;
+      padding: 12px;
+      align-items: start;
+    }
+
+    /* 좁은 화면에서도 타임라인 + 서비스 그래프 둘 다 보이도록 1열로 변환 */
+    @media (max-width: 1200px) {
+      .page {
+        grid-template-columns: 1fr;
+        grid-template-areas:
+          "timeline"
+          "svcgraph"
+          "detail";
+        /* 상세 패널은 아래로 내려 sticky 해제됨 */
+      }
+    }
+
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      background: #fff;
+    }
+
+    .hdr {
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      background: var(--subtle);
+    }
+
+    code {
+      background: #f1f5f9;
+      color: #111827;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+
+    /* ========== 타임라인 테이블 ========== */
+    .card.table {
+      grid-area: timeline;
+    }
+
+    .table {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .thead {
+      display: grid;
+      grid-template-columns: 420px 1fr;
+      /* 좌측: 트리/이름, 우측: 트랙 */
+      border-bottom: 1px solid var(--border);
+    }
+
+    .thead .left {
+      padding: 6px 8px;
+      font-weight: 600;
+    }
+
+    .ticks {
+      position: relative;
+      height: 26px;
+    }
+
+    .tickLine {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 1px;
+      background: var(--border);
+    }
+
+    .tickLbl {
+      position: absolute;
+      top: 4px;
+      transform: translateX(-50%);
+      font-size: 12px;
+      color: #725a00;
+    }
+
+    .tbody {
+      overflow: auto;
+      max-height: calc(100vh - 180px);
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 420px 1fr;
+      height: 28px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .cell {
+      padding: 0 8px;
+      font-size: 13px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      display: flex;
+      align-items: center;
+      min-width: 0;
+      /* ellipsis 유효화 */
+    }
+
+    .name {
+      color: var(--ink-weak);
+    }
+
+    .dur {
+      color: var(--muted);
+      margin-left: 6px;
+    }
+
+    .track {
+      position: relative;
+      height: 100%;
+      width: 100%;
+    }
+
+    .row:hover {
+      background: #f1f5f9;
+    }
+
+    .bar {
+      position: absolute;
+      top: 4px;
+      height: 20px;
+      border-radius: 4px;
+      z-index: 1;
+      background: linear-gradient(180deg, #e5e7eb 0%, #f9fafb 50%, #e5e7eb 100%);
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06) inset, 0 1px 2px rgba(0, 0, 0, 0.1);
+    }
+
+    .bar.err {
+      background: linear-gradient(180deg, #fecaca 0%, #ffe4e6 50%, #fecaca 100%);
+    }
+
+    .bar.warn {
+      background: linear-gradient(180deg, #fde68a 0%, #fef3c7 50%, #fde68a 100%);
+    }
+
+    .ev {
+      position: absolute;
+      top: 2px;
+      width: 0;
+      height: 20px;
+      z-index: 2;
+    }
+
+    .ev::before {
+      content: "";
+      position: absolute;
+      left: -1px;
+      top: 2px;
+      width: 2px;
+      height: 16px;
+      border-radius: 1px;
+      background: rgba(31, 41, 55, .25);
+    }
+
+    .ev::after {
+      content: "";
+      position: absolute;
+      left: -3px;
+      top: 0;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #9ca3af;
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, .08);
+    }
+
+    /* 좁은 화면: 좌측 열 폭을 살짝 줄여 가로 스크롤 의존도↓ */
+    @media (max-width: 900px) {
+
+      .thead,
+      .row {
+        grid-template-columns: minmax(280px, 1.2fr) 1fr;
+      }
+
+      .tbody {
+        max-height: none;
+      }
+
+      /* 높이 제한 해제 → 타임라인과 그래프 모두 보임 */
+    }
+
+    /* ========== Depth Segmented Control ========== */
+    .depthCtl {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dBtn {
+      padding: 0 8px;
+      height: 24px;
+      line-height: 24px;
+      border: 1px solid var(--border);
+      background: #fff;
+      border-radius: 4px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .dBtn:hover {
+      background: #f8fafc;
+    }
+
+    .segBar {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      height: 24px;
+    }
+
+    .seg {
+      width: 14px;
+      height: 10px;
+      border-radius: 2px;
+      border: 1px solid #d1d5db;
+      background: #fff;
+      cursor: pointer;
+      box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.02);
+    }
+
+    .seg.on {
+      background: #334155;
+      border-color: #334155;
+    }
+
+    .segBar:focus {
+      outline: 2px solid #93c5fd;
+      outline-offset: 2px;
+    }
+
+    /* ========== 상세 패널 ========== */
+    .details {
+      grid-area: detail;
+      position: sticky;
+      top: 0;
+      height: calc(100vh - 24px);
+      align-self: start;
+    }
+
+    @media (max-width: 1200px) {
+      .details {
+        position: relative;
+        height: auto;
+      }
+
+      /* 좁은 화면에서는 sticky 해제 */
+    }
+
+    .pane {
+      padding: 10px;
+    }
+
+    .ttl {
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .meta {
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+
+    .sec {
+      margin-top: 10px;
+    }
+
+    /* === KV 레이아웃(겹침 방지) ===
+       - 2열: 키는 내용 길이에 맞춤(max-content), 값은 남은 공간 1fr
+       - 긴 키: 한줄 ellipsis + title로 전체 확인
+       - 긴 값: 줄바꿈 허용(overflow-wrap:anywhere)으로 겹침 방지
+       - 좁은 화면: 1열 스택(dt, 다음 줄에 dd)
+    */
+    .kv {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      grid-column-gap: 10px;
+      grid-row-gap: 6px;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.4;
+      align-items: start;
+    }
+
+    .kv dt,
+    .kv dd {
+      margin: 0;
+    }
+
+    .kv dt {
+      color: var(--muted);
+      max-width: 360px;
+      /* 너무 긴 키가 좌측을 과도 확장하지 않도록 상한 */
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .kv dd {
+      /* 값은 가능한 자연스럽게 줄바꿈 */
+      white-space: normal;
+      overflow-wrap: anywhere;
+      /* 단어/토큰 중간이라도 안전하게 줄바꿈 */
+      word-break: break-word;
+      min-width: 0;
+    }
+
+    /* 초장문 값이 단일 토큰일 때 가독성 보조용 얕은 배경 */
+    .kv dd.long {
+      background: #f8fafc;
+      border-radius: 3px;
+      padding: 2px 4px;
+    }
+
+    /* 협소 화면: 키/값 1열 스택 */
+    @media (max-width: 900px) {
+      .kv {
+        grid-template-columns: 1fr;
+      }
+
+      .kv dt {
+        max-width: none;
+        white-space: normal;
+        overflow: visible;
+        text-overflow: initial;
+      }
+
+      .kv dd {
+        border-left: 2px solid var(--border);
+        padding-left: 8px;
+      }
+    }
+
+    /* 트리 텍스트 (타임라인 좌측) */
+    .tree {
+      white-space: pre;
+      /* 공백/개행 보존 */
+      font-family: ui-monospace, Consolas, monospace;
+      letter-spacing: 0;
+      color: #9aa4b2;
+      margin-right: 6px;
+      flex: 0 0 auto;
+    }
+
+    /* 선택 강조(타임라인) */
+    .row.sel {
+      background: #eef5ff;
+    }
+
+    .bar.sel {
+      box-shadow:
+        0 0 0 2px rgba(59, 130, 246, .85),
+        0 0 14px 2px rgba(59, 130, 246, .55),
+        inset 0 0 0 1px rgba(255, 255, 255, .9);
+      z-index: 3;
+    }
+
+    .row.sel .ev::before {
+      background: rgba(37, 99, 235, .45);
+    }
+
+    .row.sel .ev::after {
+      background: #60a5fa;
+    }
+
+    /* ========== 서비스 그래프 ========== */
+    #service-graph-card {
+      grid-area: svcgraph;
+    }
+
+    #service-graph {
+      height: 360px;
+    }
+
+    @media (max-width: 900px) {
+      #service-graph {
+        height: 320px;
+      }
+
+      /* 좁을 때 약간 줄여 둘 다 보이게 */
+    }
+  </style>
+</head>
+
+<body>
+  <div id="traceRoot" data-trace="{{traceId}}">
+    <div class="page">
+      <!-- 타임라인 -->
+      <section class="card table" aria-label="Trace timeline">
+        <div class="hdr">
+          <b>Trace</b> <code>{{traceId}}</code>
+          &nbsp; <small>total {{totalMs}}ms, spans {{spanCount}}</small>
+          — <a href="?format=ascii" style="color:#7aa2ff;text-decoration:none;">view as ASCII</a>
+
+          <!-- 세그먼트형 Depth 컨트롤 -->
+          <span class="depthCtl" data-max="{{maxDepth}}" aria-label="Depth control">
+            Depth:
+            <button class="dBtn" id="depthDec" type="button" aria-label="decrease depth">−</button>
+            <div id="depthSegs" class="segBar" role="slider" aria-label="depth" aria-valuemin="0"
+              aria-valuemax="{{maxDepth}}" aria-valuenow="{{maxDepth}}" tabindex="0"></div>
+            <button class="dBtn" id="depthInc" type="button" aria-label="increase depth">＋</button>
+            <small id="depthLbl" style="margin-left:4px">{{maxDepth}}</small>
+          </span>
+        </div>
+
+        <div class="thead">
+          <div class="left">Spans</div>
+          <div class="ticks" aria-hidden="true">
+            {{#ticks}}
+            <div class="tickLine" data-left="{{leftPct}}"></div>
+            <div class="tickLbl" data-left="{{leftPct}}">{{label}}ms</div>
+            {{/ticks}}
+          </div>
+        </div>
+
+        <div class="tbody">
+          {{#rows}}
+          <div class="row" data-span="{{spanId}}" data-depth="{{depth}}">
+            <div class="cell">
+              <span class="tree">{{treeText}}</span>
+              <span class="name" title="{{name}}">{{name}}</span>
+              <span class="dur"> {{durationMs}}</span>
+            </div>
+            <div class="cell" style="padding:0;">
+              <div class="track">
+                <div class="bar{{barClass}}" data-span="{{spanId}}" data-left="{{leftPct}}" data-width="{{widthVal}}"
+                  title="{{name}}"></div>
+                {{#events}}
+                <i class="ev" data-left="{{leftPct}}" title="{{label}}"></i>
+                {{/events}}
+              </div>
+            </div>
+          </div>
+          {{/rows}}
+        </div>
+      </section>
+
+      <!-- 서비스 그래프 -->
+      <section id="service-graph-card" class="card" aria-label="Service dependency graph" style="margin-top:12px;">
+        <div class="hdr"><b>Service Dependency Graph</b></div>
+        <div id="service-graph"></div>
+      </section>
+
+      <!-- 상세 패널 -->
+      <aside class="details" aria-label="Span details">
+        <div id="detailPane" class="pane">
+          <div style="color:#8b95a9;">Select a span to view details</div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <!-- Cytoscape (서비스 그래프) -->
+  <script src="/js/cytoscape.min.js"></script>
+
+  <script>
+    /* ============================================================
+     * 공통 유틸: 안전 이스케이프 / KV 렌더 / 위치 적용
+     * ============================================================ */
+    (function () {
+      /**
+       * HTML 안전 이스케이프
+       * @param {any} s
+       * @returns {string}
+       */
+      function eh(s) {
+        if (s == null) return '';
+        return String(s)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      /**
+       * Key-Value 표 렌더
+       * - 키는 한 줄 ellipsis 처리 + title 제공
+       * - 값은 줄바꿈 허용(overflow-wrap:anywhere) + 길면 .long 클래스 부여
+       * @param {Record<string, any>} obj
+       * @returns {string} innerHTML
+       */
+      function kv(obj) {
+        var h = '<dl class="kv">';
+        if (obj) for (var k in obj) {
+          if (!Object.prototype.hasOwnProperty.call(obj, k)) continue;
+          var key = String(k);
+          var val = obj[k];
+          var sval = (val == null) ? '' : String(val);
+
+          // 긴 값 여부 판정: 연속 토큰(공백/구두점 적음) 길이가 길면 .long
+          var isLong = sval.length > 80 && !/\s/.test(sval.slice(0, 80));
+          h += '<dt title="' + eh(key) + '">' + eh(key) + '</dt>';
+          h += '<dd title="' + eh(sval) + '" class="' + (isLong ? 'long' : '') + '">' + eh(sval) + '</dd>';
+        }
+        return h + '</dl>';
+      }
+
+      // 외부에서 사용
+      window.__eh = eh;
+      window.__kv = kv;
+
+      /**
+       * 초기 1회: data-* → style.left/width 적용
+       */
+      window.applyPositions = function applyPositions() {
+        var ticks = document.querySelectorAll('.tickLine[data-left],.tickLbl[data-left]');
+        for (var i = 0; i < ticks.length; i++) {
+          var el = ticks[i], v = el.getAttribute('data-left');
+          if (v) el.style.left = v;
+        }
+
+        var bars = document.querySelectorAll('.bar[data-left],.bar[data-width]');
+        for (var j = 0; j < bars.length; j++) {
+          var b = bars[j], l = b.getAttribute('data-left'), w = b.getAttribute('data-width');
+          if (l) b.style.left = l;
+          if (w) {
+            // widthVal이 'width: 12.34%' 혹은 '12.34%' 형태 모두 수용
+            var m = /^width\s*:\s*([^;]+)\s*;?$/i.exec(w);
+            b.style.width = m ? m[1] : w;
+          }
+        }
+
+        var evs = document.querySelectorAll('.ev[data-left]');
+        for (var k = 0; k < evs.length; k++) {
+          var e = evs[k], left = e.getAttribute('data-left');
+          if (left) e.style.left = left;
+        }
+      };
+    })();
+
+    /* ============================================================
+     * 상세 패널 렌더 + 선택 상태/강조 유틸
+     * ============================================================ */
+    (function () {
+      // 현재 선택 상태 전역 보관
+      window.__sel = { spanId: null, service: null, name: null };
+
+      /**
+       * 상세 패널 렌더링
+       * - 상단 메타 + Attributes/Resource/Scope + Events
+       * - KV는 겹침 방지 스타일(.kv) 적용
+       * @param {Object} j
+       */
+      window.renderDetail = function renderDetail(j) {
+        var d = document.getElementById('detailPane'); if (!d) return;
+
+        var eh = window.__eh, kv = window.__kv;
+        var h = '';
+
+        // 타이틀: 스팬 이름만 굵게 (서비스명 분리 필요시 아래 주석 참고)
+        h += '<div class="ttl"><b>' + eh(j.name || '') + '</b></div>';
+        // h += '<div class="ttl"><b>' + eh(j.service || '') + '</b> · ' + eh(j.name || '') + '</div>';
+
+        // 메타 정보: kind · statusCode · (statusMessage)
+        h += '<div class="meta">' + eh(j.kind || '') + ' · ' + eh(j.statusCode || '') +
+          (j.statusMessage ? (' · ' + eh(j.statusMessage)) : '') + '</div>';
+
+        // 속성 블록들 (겹침 방지되는 .kv)
+        h += '<div class="sec"><b>Attributes</b>' + kv(j.attributes || {}) + '</div>';
+        h += '<div class="sec"><b>Resource</b>' + kv(j.resource || {}) + '</div>';
+        h += '<div class="sec"><b>Scope</b>' + kv(j.scope || {}) + '</div>';
+
+        // 이벤트 목록 (있을 때만)
+        if (j.events && j.events.length) {
+          h += '<div class="sec"><b>Events</b><div class="kv">';
+          for (var i = 0; i < j.events.length; i++) {
+            var ev = j.events[i];
+            var when = ev.time || (ev.timeNanos ? String(ev.timeNanos) : '');
+            // 이벤트 키를 시간, 값은 이벤트명으로 표시
+            h += '<dt title="' + eh(when) + '">' + eh(when) + '</dt>' +
+              '<dd title="' + eh(ev.name || '') + '"><b>' + eh(ev.name || '') + '</b></dd>';
+            if (ev.attributes) {
+              for (var k in ev.attributes) {
+                if (!Object.prototype.hasOwnProperty.call(ev.attributes, k)) continue;
+                var kk = String(k);
+                var vv = ev.attributes[k];
+                h += '<dt title="' + eh(kk) + '" style="padding-left:10px;color:#94a3b8">' + eh(kk) + '</dt>' +
+                  '<dd title="' + eh(vv) + '">' + eh(vv) + '</dd>';
+              }
+            }
+          }
+          h += '</div></div>';
+        }
+
+        // 하단 카운트
+        h += '<div class="sec" style="color:#9aa4b2">events: ' + (j.eventCount || 0) +
+          ', links: ' + (j.linkCount || 0) + '</div>';
+
+        d.innerHTML = h;
+      };
+
+      /** 타임라인(행/막대) 강조 토글 */
+      window.highlightTimeline = function highlightTimeline(spanId) {
+        var prevRow = document.querySelector('.row.sel'); if (prevRow) prevRow.classList.remove('sel');
+        var prevBar = document.querySelector('.bar.sel'); if (prevBar) prevBar.classList.remove('sel');
+
+        if (!spanId) return;
+        var row = document.querySelector('.row[data-span="' + spanId + '"]');
+        if (row) row.classList.add('sel');
+        var bar = document.querySelector('.bar[data-span="' + spanId + '"]');
+        if (bar) bar.classList.add('sel');
+      };
+
+      /** 서비스 그래프 강조(라벨 매칭: service / name) */
+      window.highlightGraph = function highlightGraph(detail) {
+        var cy = window.__cy; if (!cy) return;
+
+        cy.nodes('.cy-focus-node').removeClass('cy-focus-node');
+        cy.edges('.cy-focus-edge').removeClass('cy-focus-edge');
+
+        var svc = detail && detail.service ? String(detail.service) : null;
+        var nm = detail && detail.name ? String(detail.name) : null;
+
+        var targets = cy.collection();
+        if (svc) targets = targets.union(cy.nodes().filter(function (n) { return n.data('label') === svc; }));
+        if (nm) targets = targets.union(cy.nodes().filter(function (n) { return n.data('label') === nm; }));
+
+        if (targets.empty()) return;
+
+        targets.addClass('cy-focus-node');
+        targets.connectedEdges().addClass('cy-focus-edge');
+
+        var bb = targets.boundingBox();
+        if (bb && isFinite(bb.w) && isFinite(bb.h)) {
+          cy.animate({ fit: { eles: targets, padding: 40 }, duration: 180 });
+        }
+      };
+
+      /** 선택 스팬 상태를 타임라인/그래프/상세에 반영 */
+      window.selectSpan = function selectSpan(spanId, detail) {
+        window.__sel.spanId = spanId || null;
+        window.__sel.service = (detail && detail.service) || null;
+        window.__sel.name = (detail && detail.name) || null;
+
+        highlightTimeline(window.__sel.spanId);
+        highlightGraph(detail || {});
+      };
+    })();
+
+    /* ============================================================
+     * 서비스 그래프: 데이터 로드 + 스타일 + 리스너
+     * ============================================================ */
+    (function () {
+      var root = document.getElementById('traceRoot');
+      var traceId = root ? root.getAttribute('data-trace') : '';
+      if (!traceId) return;
+
+      function debounce(fn, wait) {
+        var t; return function () {
+          clearTimeout(t);
+          var args = arguments, ctx = this;
+          t = setTimeout(function () { fn.apply(ctx, args); }, wait);
+        };
+      }
+
+      var cy = null;
+
+      /**
+       * 서비스 그래프 구성
+       * @param {number} depth
+       */
+      function buildServiceGraph(depth) {
+        var url = '/api/trace/' + encodeURIComponent(traceId) +
+          '/service-graph?mode=span' + (isFinite(depth) ? ('&maxDepth=' + depth) : '');
+
+        return fetch(url, { cache: 'no-store' })
+          .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+          .then(function (graph) {
+            var els = [];
+            graph.nodes.forEach(function (n) { els.push({ data: { id: n.id, label: n.label } }); });
+            graph.edges.forEach(function (e) {
+              els.push({
+                data: {
+                  id: e.id, source: e.source, target: e.target,
+                  label: (e.avgDurationMs != null ? e.avgDurationMs.toFixed(1) : '-') + ' ms'
+                },
+                classes: 'w-3'
+              });
+            });
+
+            var container = document.getElementById('service-graph');
+            if (!cy) {
+              cy = cytoscape({
+                container: container,
+                elements: els,
+                layout: { name: 'breadthfirst', directed: true, spacingFactor: 1.2, animate: false },
+                minZoom: 0.5,
+                maxZoom: 2.0,
+                style: [
+                  {
+                    selector: 'node',
+                    style: {
+                      'label': 'data(label)',
+                      'text-wrap': 'wrap',
+                      'font-size': 10,
+                      'text-valign': 'center',
+                      'text-halign': 'center',
+                      'background-color': '#e8f0fe',
+                      'border-color': '#93b7ff',
+                      'border-width': 1,
+                      'shape': 'round-rectangle',
+                      'padding': '6px'
+                    }
+                  },
+                  {
+                    selector: 'edge',
+                    style: {
+                      'curve-style': 'bezier',
+                      'target-arrow-shape': 'triangle',
+                      'line-color': '#c7cdd9',
+                      'target-arrow-color': '#c7cdd9',
+                      'label': 'data(label)',
+                      'font-size': 9,
+                      'text-background-color': '#fff',
+                      'text-background-opacity': 0.85,
+                      'text-background-padding': 2,
+                      'width': 2
+                    }
+                  },
+                  { selector: '.w-1', style: { 'width': 1 } },
+                  { selector: '.w-2', style: { 'width': 2 } },
+                  { selector: '.w-3', style: { 'width': 3 } },
+                  { selector: '.w-4', style: { 'width': 4 } },
+                  { selector: '.w-5', style: { 'width': 5 } },
+                  { selector: '.w-6', style: { 'width': 6 } },
+                  { selector: '.w-7', style: { 'width': 7 } },
+                  { selector: '.w-8', style: { 'width': 8 } },
+
+                  /* 강조 클래스(그래프 글로우) */
+                  {
+                    selector: '.cy-focus-node',
+                    style: {
+                      'border-color': '#2563eb',
+                      'border-width': 2,
+                      'shadow-blur': 16,
+                      'shadow-color': 'rgba(59,130,246,0.8)',
+                      'shadow-opacity': 1,
+                      'shadow-offset-x': 0,
+                      'shadow-offset-y': 0
+                    }
+                  },
+                  {
+                    selector: '.cy-focus-edge',
+                    style: {
+                      'width': 4,
+                      'line-color': '#2563eb',
+                      'target-arrow-color': '#2563eb',
+                      'shadow-blur': 12,
+                      'shadow-color': 'rgba(59,130,246,0.7)',
+                      'shadow-opacity': 1,
+                      'shadow-offset-x': 0,
+                      'shadow-offset-y': 0
+                    }
+                  }
+                ]
+              });
+              window.__cy = cy;  // 전역 보관(강조 함수 접근용)
+              window.addEventListener('resize', function () { cy && cy.resize(); });
+            } else {
+              cy.elements().remove();
+              cy.add(els);
+              cy.layout({ name: 'breadthfirst', directed: true, spacingFactor: 1.2, animate: false }).run();
+
+              // 선택 상태가 있다면 강조 복원
+              if (window.__sel && (window.__sel.service || window.__sel.name)) {
+                highlightGraph({ service: window.__sel.service, name: window.__sel.name });
+              }
+            }
+          });
+      }
+
+      // depth 변경 이벤트 → 그래프 재생성(디바운스)
+      var rebuild = debounce(function (ev) {
+        var depth = (ev && ev.detail && typeof ev.detail.depth === 'number')
+          ? ev.detail.depth : Number.POSITIVE_INFINITY;
+        buildServiceGraph(depth).catch(function (err) { console.error('[service-graph]', err); });
+      }, 120);
+
+      window.addEventListener('depthchange', rebuild);
+    })();
+
+    /* ============================================================
+     * Depth 세그먼트 컨트롤: 생성/동기화/단축키
+     * ============================================================ */
+    (function () {
+      function syncDepthUI(depth) {
+        var segBar = document.getElementById('depthSegs');
+        if (segBar) {
+          segBar.setAttribute('aria-valuenow', String(depth));
+          var segs = segBar.querySelectorAll('.seg');
+          for (var i = 0; i < segs.length; i++) {
+            if (i <= depth) segs[i].classList.add('on');
+            else segs[i].classList.remove('on');
+          }
+        }
+        var lbl = document.getElementById('depthLbl');
+        if (lbl) lbl.textContent = String(depth);
+      }
+
+      /**
+       * 행 show/hide + UI/이벤트 동기화
+       * @param {number} depth
+       */
+      function applyDepthFilter(depth) {
+        var rows = document.querySelectorAll('.row[data-depth]');
+        for (var i = 0; i < rows.length; i++) {
+          var d = parseInt(rows[i].getAttribute('data-depth'), 10) || 0;
+          rows[i].style.display = (d <= depth) ? '' : 'none';
+        }
+        syncDepthUI(depth);
+        window.dispatchEvent(new CustomEvent('depthchange', { detail: { depth: depth } }));
+      }
+      window.applyDepthFilter = applyDepthFilter; // 외부에서 필요 시 사용
+
+      // 초기화
+      window.initDepthFilter = function initDepthFilter() {
+        var ctl = document.querySelector('.depthCtl');
+        var segBar = document.getElementById('depthSegs');
+        var btnDec = document.getElementById('depthDec');
+        var btnInc = document.getElementById('depthInc');
+        if (!ctl || !segBar) return;
+
+        var max = parseInt(ctl.getAttribute('data-max'), 10) || 0;
+        var depth = max;  // 초기값: max (기존 동작 유지)
+
+        // 세그먼트 생성: 0..max (총 max+1개)
+        segBar.innerHTML = '';
+        for (var i = 0; i <= max; i++) {
+          var s = document.createElement('i');
+          s.className = 'seg'; s.setAttribute('data-idx', String(i));
+          s.title = 'depth ' + i;
+          s.addEventListener('click', function (ev) {
+            var idx = parseInt(ev.currentTarget.getAttribute('data-idx'), 10) || 0;
+            depth = idx; applyDepthFilter(depth);
+          });
+          segBar.appendChild(s);
+        }
+
+        // 초기 반영(→ depthchange 이벤트 발행되어 그래프 초기 렌더 트리거)
+        applyDepthFilter(depth);
+
+        function clamp(v, mi, ma) { return Math.max(mi, Math.min(ma, v)); }
+
+        if (btnDec) btnDec.addEventListener('click', function () {
+          depth = clamp(depth - 1, 0, max);
+          applyDepthFilter(depth);
+        });
+        if (btnInc) btnInc.addEventListener('click', function () {
+          depth = clamp(depth + 1, 0, max);
+          applyDepthFilter(depth);
+        });
+
+        // 키보드: 세그 바 포커스 상태에서 ←/→/Home/End
+        segBar.addEventListener('keydown', function (e) {
+          if (e.key === 'ArrowLeft') { depth = clamp(depth - 1, 0, max); applyDepthFilter(depth); e.preventDefault(); }
+          else if (e.key === 'ArrowRight') { depth = clamp(depth + 1, 0, max); applyDepthFilter(depth); e.preventDefault(); }
+          else if (e.key === 'Home') { depth = 0; applyDepthFilter(depth); e.preventDefault(); }
+          else if (e.key === 'End') { depth = max; applyDepthFilter(depth); e.preventDefault(); }
+        });
+
+        // 전역 단축키: [ / ]
+        document.addEventListener('keydown', function (e) {
+          if (e.target && /input|textarea|select/i.test(e.target.tagName)) return;
+          if (e.key === '[') { depth = clamp(depth - 1, 0, max); applyDepthFilter(depth); }
+          else if (e.key === ']') { depth = clamp(depth + 1, 0, max); applyDepthFilter(depth); }
+        });
+      };
+    })();
+
+    /* ============================================================
+     * 부트스트랩: 위치 적용 / 깊이컨트롤 / 클릭 핸들러
+     * ============================================================ */
+    (function () {
+      var root = document.getElementById('traceRoot');
+      var traceId = root ? (root.getAttribute('data-trace') || '') : '';
+
+      // 스팬 클릭 → 상세 요청 → 강조 동기화
+      document.addEventListener('click', function (e) {
+        var row = (e.target.closest && e.target.closest('.row')) ? e.target.closest('.row') : null;
+        if (!row) {
+          var bar = (e.target.closest && e.target.closest('.bar')) ? e.target.closest('.bar') : null;
+          if (bar) row = bar.closest('.row');
+        }
+        if (!row) return;
+
+        var spanId = row.getAttribute('data-span'); if (!spanId) return;
+
+        fetch('/api/span?traceId=' + encodeURIComponent(traceId) + '&spanId=' + encodeURIComponent(spanId))
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            renderDetail(j);
+            selectSpan(spanId, j);  // 타임라인/그래프 강조 동기화
+          })
+          .catch(function (err) {
+            var d = document.getElementById('detailPane');
+            if (d) d.textContent = '(error) ' + err;
+          });
+      });
+
+      function boot() {
+        applyPositions();   // 막대/틱/이벤트 data-* 스타일 적용
+        initDepthFilter();  // 세그먼트형 depth 컨트롤 초기화(→ 그래프 첫 렌더 트리거)
+      }
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', boot);
+      } else {
+        boot();
+      }
+    })();
+  </script>
+</body>
+
+</html>
