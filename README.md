@@ -4,7 +4,7 @@
 운영 환경에서 서비스 호출 관계와 트레이스 흐름을 직관적으로 파악하고, 디버깅 및 성능 분석을 지원하는 것을 목표로 합니다.
 
 
-![Demo Animation](./DEMO.mp4)
+https://github.com/user-attachments/assets/a273c52d-a80e-436c-9dbd-6ffee7f667f0
 
 ---
 
